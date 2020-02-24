@@ -14,21 +14,22 @@ def _predict(model, img, is_custom_model, from_logits):
     return logits
 
 
-def choose_images(model, attack_gen=None, X_val=None, y_val=None, is_custom_model=False, threshold=0., from_logits=False):
+def choose_images(model, attack_gen=None, X_val=None, y_val=None, is_custom_model=False, 
+		  threshold=0., from_logits=False):
     while True:
         if attack_gen:
-		        attacked_img, attacked_class = attack_gen.next()
-		        changed_img, changed_class = attack_gen.next()
+	    attacked_img, attacked_class = attack_gen.next()
+	    changed_img, changed_class = attack_gen.next()
 
-		        attacked_img = tf.cast(attacked_img, tf.float32)
-		        changed_img = tf.cast(changed_img, tf.float32)
+	    attacked_img = tf.cast(attacked_img, tf.float32)
+	    changed_img = tf.cast(changed_img, tf.float32)
 
-		        if attack_gen.class_mode == "categorical":
-		            attacked_class = np.argmax(attacked_class[0])
-		            changed_class = np.argmax(changed_class[0])
-		        else:
-		            attacked_class = int(attacked_class[0])
-		            changed_class = int(changed_class[0])
+	    if attack_gen.class_mode == "categorical":
+	        attacked_class = np.argmax(attacked_class[0])
+	        changed_class = np.argmax(changed_class[0])
+	    else:
+	        attacked_class = int(attacked_class[0])
+	        changed_class = int(changed_class[0])
         else:
             att_i, ch_i = np.random.randint(len(X_val), size=2)
 
@@ -72,7 +73,8 @@ def choose_images(model, attack_gen=None, X_val=None, y_val=None, is_custom_mode
     return attacked_img, changed_img
 
 
-def attack(model, attacked_img, changed_img, is_custom_model=False, from_logits=False, eps=1, fn=tf.identity, iterations=40, with_jpeg=False):  
+def attack(model, attacked_img, changed_img, is_custom_model=False, from_logits=False, eps=1, 
+	   fn=tf.identity, iterations=40, with_jpeg=False):  
     y = _predict(model, attacked_img, is_custom_model, from_logits)
     first_img = tf.identity(changed_img)
 
