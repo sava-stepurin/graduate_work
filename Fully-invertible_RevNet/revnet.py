@@ -28,8 +28,8 @@ class RevNet(tf.keras.Model):
         [
             tf.keras.layers.Conv2D(
                 filters=self.config.init_filters,
-                kernel_size=self.config.init_kernel,
-                strides=(self.config.init_stride, self.config.init_stride),
+                kernel_size=1,
+                strides=(1, 1),
                 data_format=self.config.data_format,
                 use_bias=False,
                 padding="SAME",
@@ -39,21 +39,7 @@ class RevNet(tf.keras.Model):
         name="init")
     return init_block
 
-  def _construct_final_block(self):
-    f = self.config.filters[-1]  # Number of filters
-    r = functools.reduce(operator.mul, self.config.strides, 1)  # Reduce ratio
-    r *= self.config.init_stride
-
-    if self.config.data_format == "channels_first":
-      w, h = self.config.input_shape[1], self.config.input_shape[2]
-      input_shape = (f, w // r, h // r)
-    elif self.config.data_format == "channels_last":
-      w, h = self.config.input_shape[0], self.config.input_shape[1]
-      input_shape = (w // r, h // r, f)
-    else:
-      raise ValueError("Data format should be either `channels_first`"
-                       " or `channels_last`")
-    
+  def _construct_final_block(self):    
     final_block = tf.keras.Sequential(
         [
             tf.keras.layers.Flatten(),
@@ -66,48 +52,32 @@ class RevNet(tf.keras.Model):
     return final_block
 
   def _construct_intermediate_blocks(self):
-    # Precompute input shape after initial block
-    stride = self.config.init_stride
-    if self.config.data_format == "channels_first":
-      w, h = self.config.input_shape[1], self.config.input_shape[2]
-      input_shape = (self.config.init_filters, w // stride, h // stride)
-    else:
-      w, h = self.config.input_shape[0], self.config.input_shape[1]
-      input_shape = (w // stride, h // stride, self.config.init_filters)
+    filters = self.config.init_filters
+    input_shape = self.config.input_shape
 
     # Aggregate intermediate blocks
 
     block_list = []
     for i in range(self.config.n_rev_blocks):
-      # RevBlock configurations
-      n_res = self.config.n_res[i]
-      filters = self.config.filters[i]
-      if filters % 2 != 0:
-        raise ValueError("Number of output filters must be even to ensure"
-                         "correct partitioning of channels")
-      stride = self.config.strides[i]
-      strides = (self.config.strides[i], self.config.strides[i])
+      # Compute input shape
+      if self.config.data_format == "channels_first":
+        w, h = input_shape[1], input_shape[2]
+        input_shape = (filters * self.config.ratio[i]**2, w // self.config.ratio[i], h // self.config.ratio[i])
+        filters *= self.config.ratio[i]**2
+      else:
+        w, h = input_shape[0], input_shape[1]
+        input_shape = (w // self.config.ratio[i], h // self.config.ratio[i], filters * self.config.ratio[i]**2)
+        filters *= self.config.ratio[i]**2
 
       # Add block
       rev_block = RevBlock(
-          n_res,
           filters,
-          strides,
           input_shape,
-          batch_norm_first=(i != 0),  # Only skip on first block
           data_format=self.config.data_format,
           bottleneck=self.config.bottleneck,
           fused=self.config.fused,
           dtype=self.config.dtype)
       block_list.append(rev_block)
-
-      # Precompute input shape for the next block
-      if self.config.data_format == "channels_first":
-        w, h = input_shape[1], input_shape[2]
-        input_shape = (filters, w // stride, h // stride)
-      else:
-        w, h = input_shape[0], input_shape[1]
-        input_shape = (w // stride, h // stride, filters)
 
     return block_list
 
@@ -117,15 +87,17 @@ class RevNet(tf.keras.Model):
     if training:
       saved_hidden = [inputs]
 
-    h = self._init_block(inputs, training=training)
+    curr = self._init_block(inputs, training=training)
 
-    for block in self._block_list:
-      h = block(h, training=training)
+    for i, block in enumerate(self._block_list):
+      if self.config.ratio[i] > 1:
+        curr = tf.nn.space_to_depth(curr, self.config.ratio[i])
+      curr = block(curr, training=training)
       
     if training:
-      saved_hidden.append(h)
+      saved_hidden.append(curr)
 
-    logits = self._final_block(h, training=training)
+    logits = self._final_block(curr, training=training)
 
     return (logits, saved_hidden) if training else (logits, None)
 
@@ -183,11 +155,15 @@ class RevNet(tf.keras.Model):
 
     # Manually backprop through intermediate blocks
     y = saved_hidden.pop()
-    for block in reversed(self._block_list):
+    for i, block in enumerate(reversed(self._block_list)):
       y, dy, grads, vars_ = block.backward_grads_and_vars(
           y, dy, training=training)
       grads_all += grads
       vars_all += vars_
+
+      if self.config.ratio[self.config.n_rev_blocks - 1 - i] > 1:
+        y = tf.nn.depth_to_space(y, self.config.ratio[self.config.n_rev_blocks - 1 - i])
+        dy = tf.nn.depth_to_space(dy, self.config.ratio[self.config.n_rev_blocks - 1 - i])
 
     # Manually backprop through first block
     x = saved_hidden.pop()
@@ -244,19 +220,22 @@ class RevNet(tf.keras.Model):
       var_.assign(val)
 
   def get_x(self, y):
-    y = tf.reshape(y, (1, 224, 224, 32))
-    for block in reversed(self._block_list):
-      for i in reversed(range(len(block.blocks))):
-          res_block = block.blocks[i]
-          
-          y1, y2 = tf.split(y, num_or_size_splits=2, axis=-1)
-          z1 = y1
-          gz1 = res_block.g(z1, training=False)
-          x2 = y2 - gz1
-          fx2 = res_block.f(x2, training=False)
-          x1 = z1 - fx2
-          x = tf.concat([x1, x2], axis=-1)
-          y = x
+    ratio = np.prod(self.config.ratio)
+    y = tf.reshape(y, (1, 224 // ratio, 224 // ratio, 32 * (ratio**2)))
+    for i, block in enumerate(reversed(self._block_list)):
+      res_block = block
+
+      y1, y2 = tf.split(y, num_or_size_splits=2, axis=-1)
+      z1 = y1
+      gz1 = res_block.g(z1, training=False)
+      x2 = y2 - gz1
+      fx2 = res_block.f(x2, training=False)
+      x1 = z1 - fx2
+      x = tf.concat([x1, x2], axis=-1)
+      y = x
+      
+      if self.config.ratio[self.config.n_rev_blocks - 1 - i] > 1:
+        y = tf.nn.depth_to_space(y, self.config.ratio[self.config.n_rev_blocks - 1 - i])
     
     res_x = np.zeros(self.config.input_shape)
     for i in range(res_x.shape[0]):
@@ -272,7 +251,9 @@ class RevNet(tf.keras.Model):
   def get_nuisance(self, inputs):
     h = self._init_block(inputs, training=False)
 
-    for block in self._block_list:
+    for i, block in enumerate(self._block_list):
+      if self.config.ratio[i] > 1:
+        h = tf.nn.space_to_depth(h, self.config.ratio[i])
       h = block(h, training=False)
 
     logits = tf.keras.layers.Flatten()(h)
