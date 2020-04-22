@@ -221,7 +221,7 @@ class RevNet(tf.keras.Model):
 
   def get_x(self, y):
     ratio = np.prod(self.config.ratio)
-    y = tf.reshape(y, (1, 224 // ratio, 224 // ratio, 32 * (ratio**2)))
+    y = tf.reshape(y, (1, 224 // ratio, 224 // ratio, self.config.init_filters * (ratio**2)))
     for i, block in enumerate(reversed(self._block_list)):
       res_block = block
 
