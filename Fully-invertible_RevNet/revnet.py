@@ -39,10 +39,12 @@ class RevNet(tf.keras.Model):
         name="init")
     return init_block
 
-  def _construct_final_block(self):    
+  def _construct_final_block(self): 
+    ratio = np.prod(self.config.ratio)
+    input_shape = (self.config.input_shape[0] // ratio, self.config.input_shape[1] // ratio, self.config.init_filters * (ratio**2)) 
     final_block = tf.keras.Sequential(
         [
-            tf.keras.layers.Flatten(),
+            tf.keras.layers.Flatten(input_shape=input_shape),
             tf.keras.layers.Lambda(lambda x: tf.split(x, 
                                                       num_or_size_splits=[self.config.n_classes, 
                                                                           x.shape[-1] - self.config.n_classes], 
@@ -221,7 +223,7 @@ class RevNet(tf.keras.Model):
 
   def get_x(self, y):
     ratio = np.prod(self.config.ratio)
-    y = tf.reshape(y, (1, 224 // ratio, 224 // ratio, self.config.init_filters * (ratio**2)))
+    y = tf.reshape(y, (1, self.config.input_shape[0] // ratio, self.config.input_shape[1] // ratio, self.config.init_filters * (ratio**2)))
     for i, block in enumerate(reversed(self._block_list)):
       res_block = block
 
