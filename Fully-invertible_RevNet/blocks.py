@@ -122,7 +122,7 @@ def _BottleneckResidualInner(filters,
   model.add(tf.keras.layers.Activation("relu"))
   model.add(
       tf.keras.layers.Conv2D(
-          filters=filters // 4,
+          filters=32,
           kernel_size=1,
           strides=(1, 1),
           input_shape=input_shape,
@@ -135,8 +135,7 @@ def _BottleneckResidualInner(filters,
       tf.keras.layers.BatchNormalization(axis=axis, fused=fused, dtype=dtype))
   model.add(tf.keras.layers.Activation("relu"))
   model.add(
-      tf.keras.layers.Conv2D(
-          filters=filters // 4,
+      tf.keras.layers.DepthwiseConv2D(
           kernel_size=3,
           strides=(1, 1),
           data_format=data_format,

@@ -7,19 +7,22 @@ from tensorflow.keras.preprocessing.image import ImageDataGenerator
 import ops
 import revnet
 
+import tqdm
+
 
 def get_hparams_imagenette():
     config = ops.HParams()
     config.add_hparam("init_filters", 32)
-    config.add_hparam("n_classes", 10)
+    config.add_hparam("n_classes", 1000)
     config.add_hparam("n_rev_blocks", 22)
     config.add_hparam("ratio", ([2] + [1] * 10) * 2)
-    config.add_hparam("batch_size", 32)
-    config.add_hparam("bottleneck", False)
+    config.add_hparam("batch_size", 64)
+    config.add_hparam("bottleneck", True)
     config.add_hparam("fused", True)
     config.add_hparam("input_shape", (224, 224, 3))
     config.add_hparam("data_format", "channels_last")
     config.add_hparam("dtype", tf.float32)
+    config.add_hparam("with_dense", True)
 
     config.add_hparam("epochs", 20)
     config.add_hparam("weight_decay", 1e-4)
@@ -30,13 +33,13 @@ def get_hparams_imagenette():
 if __name__ == "__main__":
     config = get_hparams_imagenette()
 
-    imagegen_train = ImageDataGenerator(rescale=1 / 255)
-    imagegen_val = ImageDataGenerator(rescale=1 / 255)
+    imagegen = ImageDataGenerator(rescale=1./255,
+                                  validation_split=0.2)
 
-    train = imagegen_train.flow_from_directory("imagenette2/train/", class_mode="sparse", shuffle=True,
-                                               batch_size=config.batch_size, target_size=(224, 224))
-    val = imagegen_val.flow_from_directory("imagenette2/val/", class_mode="sparse", shuffle=False,
-                                           batch_size=config.batch_size, target_size=(224, 224))
+    train = imagegen.flow_from_directory("/data/imagenet1k/train/", class_mode="sparse", shuffle=True,
+                                          batch_size=config.batch_size, target_size=(224, 224), subset='training')
+    val = imagegen.flow_from_directory("/data/imagenet1k/train/", class_mode="sparse", shuffle=False,
+                                       batch_size=config.batch_size, target_size=(224, 224), subset='validation')
 
     model = revnet.RevNet(config=config)
     model_name = "model_with_two_ratios"
@@ -55,7 +58,7 @@ if __name__ == "__main__":
         train_mean_loss = tf.keras.metrics.Mean('train_loss', dtype=tf.float32)
         train_acc_metric = tf.keras.metrics.SparseCategoricalAccuracy('train_accuracy')
 
-        for step in range(int(np.ceil(train.samples / train.batch_size))):
+        for step in tqdm.trange(int(np.ceil(train.samples / train.batch_size))):
             x_batch_train, y_batch_train = train.next()
 
             grads, vars_, loss = model.compute_gradients(x_batch_train, y_batch_train, training=True)
@@ -66,14 +69,16 @@ if __name__ == "__main__":
             train_mean_loss(loss)
             train_acc_metric(y_batch_train, logits)
 
-        with train_summary_writer.as_default():
-            tf.summary.scalar('loss', train_mean_loss.result(), step=epoch)
-            tf.summary.scalar('accuracy', train_acc_metric.result(), step=epoch)
+            if (step + 1) % 500 == 0:
+                with train_summary_writer.as_default():
+                    tf.summary.scalar('loss', train_mean_loss.result(), step=32 * epoch + step // 500)
+                    tf.summary.scalar('accuracy', train_acc_metric.result(), step=32 * epoch + step // 500)
+                print('Current loss: {}, Current accuracy: {}'.format(train_mean_loss.result(), train_acc_metric.result()))
 
         val_mean_loss = tf.keras.metrics.Mean('val_loss', dtype=tf.float32)
         val_acc_metric = tf.keras.metrics.SparseCategoricalAccuracy('val_accuracy')
 
-        for step in range(int(np.ceil(val.samples / val.batch_size))):
+        for step in tqdm.trange(int(np.ceil(val.samples / val.batch_size))):
             x_batch_val, y_batch_val = val.next()
 
             logits, _ = model(x_batch_val, training=False)
@@ -83,8 +88,8 @@ if __name__ == "__main__":
             val_acc_metric(y_batch_val, logits)
 
         with test_summary_writer.as_default():
-            tf.summary.scalar('loss', val_mean_loss.result(), step=epoch)
-            tf.summary.scalar('accuracy', val_acc_metric.result(), step=epoch)
+            tf.summary.scalar('loss', val_mean_loss.result(), step=32 * (epoch + 1))
+            tf.summary.scalar('accuracy', val_acc_metric.result(), step=32 * (epoch + 1))
 
         template = 'Epoch {}, Loss: {}, Accuracy: {}, Val Loss: {}, Val Accuracy: {}'
         print(template.format(epoch + 1,
@@ -98,3 +103,4 @@ if __name__ == "__main__":
             max_val_acc = float(val_acc_metric.result())
 
         model.save_weights("models/curr_"+model_name+".hdf5")
+

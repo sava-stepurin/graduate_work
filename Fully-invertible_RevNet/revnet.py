@@ -42,15 +42,16 @@ class RevNet(tf.keras.Model):
   def _construct_final_block(self): 
     ratio = np.prod(self.config.ratio)
     input_shape = (self.config.input_shape[0] // ratio, self.config.input_shape[1] // ratio, self.config.init_filters * (ratio**2)) 
+    len_values = np.prod(input_shape)
     final_block = tf.keras.Sequential(
         [
             tf.keras.layers.Flatten(input_shape=input_shape),
-            tf.keras.layers.Lambda(lambda x: tf.split(x, 
-                                                      num_or_size_splits=[self.config.n_classes, 
-                                                                          x.shape[-1] - self.config.n_classes], 
-                                                      axis=1)[0])
+            tf.keras.layers.Lambda(lambda x: x[..., ::(len_values // self.config.n_classes)][..., :self.config.n_classes])
         ],
         name="final")
+    
+    if self.config.with_dense:
+        final_block.add(tf.keras.layers.Dense(self.config.n_classes))
     return final_block
 
   def _construct_intermediate_blocks(self):
@@ -221,7 +222,18 @@ class RevNet(tf.keras.Model):
     for var_, val in vars_and_vals:
       var_.assign(val)
 
-  def get_x(self, y):
+  def get_x(self, logits, nuisance):
+    logits_before_dense_np = logits.numpy()[0]
+    if self.config.with_dense:
+        W = self._final_block.trainable_variables[0].numpy()
+        b = self._final_block.trainable_variables[1].numpy()
+        logits_before_dense_np = np.linalg.solve(W.T, logits.numpy()[0] - b)
+
+    len_values = np.prod(self.config.input_shape[:2]) * self.config.init_filters
+    nuisance_np = nuisance.numpy()
+    nuisance_np = np.insert(nuisance_np, np.array(range(self.config.n_classes)) * (len_values // self.config.n_classes - 1), logits_before_dense_np)
+    y = tf.convert_to_tensor(nuisance_np, dtype=self.config.dtype)
+
     ratio = np.prod(self.config.ratio)
     y = tf.reshape(y, (1, self.config.input_shape[0] // ratio, self.config.input_shape[1] // ratio, self.config.init_filters * (ratio**2)))
     for i, block in enumerate(reversed(self._block_list)):
@@ -258,8 +270,9 @@ class RevNet(tf.keras.Model):
         h = tf.nn.space_to_depth(h, self.config.ratio[i])
       h = block(h, training=False)
 
-    logits = tf.keras.layers.Flatten()(h)
+    all_values = tf.keras.layers.Flatten()(h)
 
-    _, nuisance = tf.split(logits, num_or_size_splits=[self.config.n_classes, logits.shape[-1] - self.config.n_classes], axis=1)
+    result = np.delete(all_values.numpy(), np.array(range(self.config.n_classes)) * (all_values.shape[-1] // self.config.n_classes))
 
+    nuisance = tf.convert_to_tensor(result, dtype=self.config.dtype)
     return nuisance
