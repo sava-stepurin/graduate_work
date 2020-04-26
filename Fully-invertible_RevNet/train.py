@@ -61,10 +61,8 @@ if __name__ == "__main__":
         for step in tqdm.trange(int(np.ceil(train.samples / train.batch_size))):
             x_batch_train, y_batch_train = train.next()
 
-            grads, vars_, loss = model.compute_gradients(x_batch_train, y_batch_train, training=True)
+            grads, vars_, loss, logits = model.compute_gradients(x_batch_train, y_batch_train, training=True)
             optimizer.apply_gradients(zip(grads, vars_))
-
-            logits, _ = model(x_batch_train, training=False)
 
             train_mean_loss(loss)
             train_acc_metric(y_batch_train, logits)

@@ -135,7 +135,7 @@ class RevNet(tf.keras.Model):
 
     # Run forward pass to record hidden states; avoid updating running averages
     vars_and_vals = self.get_moving_stats()
-    _, saved_hidden = self.call(inputs, training=training)
+    logits, saved_hidden = self.call(inputs, training=training)
     self.restore_moving_stats(vars_and_vals)
 
     grads_all = []
@@ -185,7 +185,7 @@ class RevNet(tf.keras.Model):
     if l2_reg:
       grads_all = self._apply_weight_decay(grads_all, vars_all)
 
-    return grads_all, vars_all, loss
+    return grads_all, vars_all, loss, logits
 
   def _apply_weight_decay(self, grads, vars_):
     """Update gradients to reflect weight decay."""
