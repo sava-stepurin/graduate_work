@@ -35,17 +35,16 @@ if __name__ == "__main__":
 
     imagegen = ImageDataGenerator(rescale=1./255,
                                   validation_split=0.2)
-    def make_train_generator():
-        train = imagegen.flow_from_directory("/data/imagenet1k/train/", class_mode="sparse", shuffle=True,
-                                             batch_size=config.batch_size, target_size=(224, 224), subset='training')
-        return train
-    train = tf.data.Dataset.from_generator(make_train_generator, (tf.float32, tf.float32)).prefetch(1)
 
-    def make_val_generator():
-        val = imagegen.flow_from_directory("/data/imagenet1k/train/", class_mode="sparse", shuffle=False,
-                                           batch_size=config.batch_size, target_size=(224, 224), subset='validation')
-        return val
-    val = tf.data.Dataset.from_generator(make_val_generator, (tf.float32, tf.float32)).prefetch(1)
+    train = imagegen.flow_from_directory("/data/imagenet1k/train/", class_mode="sparse", shuffle=True,
+                                         batch_size=config.batch_size, target_size=(224, 224), subset='training')
+    train_size = int(np.ceil(train.samples / train.batch_size))
+    train_dataset = tf.data.Dataset.from_generator(lambda: train, (tf.float32, tf.float32)).prefetch(1)
+
+    val = imagegen.flow_from_directory("/data/imagenet1k/train/", class_mode="sparse", shuffle=False,
+                                       batch_size=config.batch_size, target_size=(224, 224), subset='validation')
+    val_size = int(np.ceil(val.samples / val.batch_size))
+    val_dataset = tf.data.Dataset.from_generator(lambda: val, (tf.float32, tf.float32)).prefetch(1)
 
     model = revnet.RevNet(config=config)
     model_name = "model_with_two_ratios"
@@ -64,7 +63,10 @@ if __name__ == "__main__":
         train_mean_loss = tf.keras.metrics.Mean('train_loss', dtype=tf.float32)
         train_acc_metric = tf.keras.metrics.SparseCategoricalAccuracy('train_accuracy')
 
-        for step, (x_batch_train, y_batch_train) in enumerate(tqdm.tqdm(train)):
+        for step, (x_batch_train, y_batch_train) in enumerate(tqdm.tqdm(train_dataset)):
+            if step >= train_size:
+                break
+
             grads, vars_, loss, logits = model.compute_gradients(x_batch_train, y_batch_train, training=True)
             optimizer.apply_gradients(zip(grads, vars_))
 
@@ -80,7 +82,10 @@ if __name__ == "__main__":
         val_mean_loss = tf.keras.metrics.Mean('val_loss', dtype=tf.float32)
         val_acc_metric = tf.keras.metrics.SparseCategoricalAccuracy('val_accuracy')
 
-        for step, (x_batch_val, y_batch_val) in enumerate(tqdm.tqdm(val)):
+        for step, (x_batch_val, y_batch_val) in enumerate(tqdm.tqdm(val_dataset)):
+            if step >= val_size:
+                break
+
             logits, _ = model(x_batch_val, training=False)
             loss = model.compute_loss(logits=logits, labels=y_batch_val)
 
