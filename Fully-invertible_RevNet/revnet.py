@@ -254,11 +254,14 @@ class RevNet(tf.keras.Model):
     res_x = np.zeros(self.config.input_shape)
     for i in range(res_x.shape[0]):
       for j in range(res_x.shape[1]):
-        res_x[i, j] = np.linalg.solve(self._init_block.trainable_variables[0][0, 0, :, :3].numpy().T, 
-                                      y[0, i, j, :3].numpy())
+        res_x[i, j] = np.linalg.solve(self._init_block.trainable_variables[0][0, 0, :, :self.config.input_shape[-1]].numpy().T, 
+                                      y[0, i, j, :self.config.input_shape[-1]].numpy())
     
-    res_x = np.clip(res_x, 0, 1)
-    plt.imshow(res_x)
+    # res_x = np.clip(res_x, 0, 1)
+    # if self.config.input_shape[-1] == 1:
+    #    plt.imshow(res_x[:, :, 0])
+    # else:
+    #    plt.imshow(res_x)
 
     return res_x
 
