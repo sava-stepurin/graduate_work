@@ -38,15 +38,49 @@ class RevNet(tf.keras.Model):
         ],
         name="init")
     return init_block
+    
+  def _get_logit_mask(self, b_s):
+    shape = int((np.prod(self.config.input_shape[:-1]) * self.config.init_filters) ** 0.5)
+    mask = np.zeros((b_s, shape, shape), dtype=int)
+    current_idx = 0
+    for sum_idx in range((shape - 1) * 2 + 1):
+      if current_idx == self.config.n_classes:
+        break
+      for i in range(sum_idx + 1):
+        if i >= shape:
+          break
+        if sum_idx - i < shape:
+          mask[:, i, sum_idx - i] = 1
+          current_idx += 1
+          if current_idx == self.config.n_classes:
+            break
+    return mask
+    
+  def _get_logits(self, x):
+    mask = self._get_logit_mask(x.shape[0])
+    logits = tf.reshape(tf.reshape(x, [-1])[mask.flatten() == 1], [x.shape[0], -1])
+    return logits
+    
+  def _get_nuisance(self, x):
+    mask = self._get_logit_mask(x.shape[0])
+    nuisance = tf.reshape(tf.reshape(x, [-1])[mask.flatten() == 0], [x.shape[0], -1])
+    return nuisance
+    
+  def _dct_2d(self, x):
+    shape = x.shape
+    block_size = int(shape[-1] ** 0.5)
+    x = tf.reshape(tf.nn.depth_to_space(x, block_size), [shape[0], shape[1] * block_size, shape[2] * block_size])
+    x = tf.signal.dct(x, norm="ortho")
+    x = tf.transpose(tf.signal.dct(tf.transpose(x, perm=[0, 2, 1]), norm="ortho"), perm=[0, 2, 1])
+    return x
 
-  def _construct_final_block(self): 
+  def _construct_final_block(self):
     ratio = np.prod(self.config.ratio)
-    input_shape = (self.config.input_shape[0] // ratio, self.config.input_shape[1] // ratio, self.config.init_filters * (ratio**2)) 
-    len_values = np.prod(input_shape)
+    input_shape = (self.config.input_shape[0] // ratio, self.config.input_shape[1] // ratio, self.config.init_filters * (ratio**2))
     final_block = tf.keras.Sequential(
         [
-            tf.keras.layers.Flatten(input_shape=input_shape),
-            tf.keras.layers.Lambda(lambda x: x[..., ::(len_values // self.config.n_classes)][..., :self.config.n_classes])
+            tf.keras.layers.Lambda(self._dct_2d),
+            tf.keras.layers.Lambda(self._get_logits)
         ],
         name="final")
     
@@ -83,7 +117,7 @@ class RevNet(tf.keras.Model):
       block_list.append(rev_block)
 
     return block_list
-
+    
   def call(self, inputs, training=True):
     """Forward pass."""
 
@@ -223,19 +257,31 @@ class RevNet(tf.keras.Model):
       var_.assign(val)
 
   def get_x(self, logits, nuisance):
+    # inverse last dense layer
     logits_before_dense_np = logits.numpy()[0]
     if self.config.with_dense:
         W = self._final_block.trainable_variables[0].numpy()
         b = self._final_block.trainable_variables[1].numpy()
         logits_before_dense_np = np.linalg.solve(W.T, logits.numpy()[0] - b)
-
-    len_values = np.prod(self.config.input_shape[:2]) * self.config.init_filters
-    nuisance_np = nuisance.numpy()
-    nuisance_np = np.insert(nuisance_np, np.array(range(self.config.n_classes)) * (len_values // self.config.n_classes - 1), logits_before_dense_np)
-    y = tf.convert_to_tensor(nuisance_np, dtype=self.config.dtype)
-
+        
+    # make tensor with logits + nuisance
+    b_s = logits.shape[0]
+    mask = self._get_logit_mask(b_s)
+    shape = int((np.prod(self.config.input_shape[:-1]) * self.config.init_filters) ** 0.5)
+    np_res = np.zeros(b_s * shape * shape)
+    np_res[mask.flatten() == 1] = tf.reshape(logits_before_dense_np, [-1])
+    np_res[mask.flatten() == 0] = tf.reshape(nuisance, [-1])
+    y = tf.convert_to_tensor(np_res.reshape((b_s, shape, shape)), dtype=tf.float32)
+    
+    # inverse dct_2d
     ratio = np.prod(self.config.ratio)
-    y = tf.reshape(y, (1, self.config.input_shape[0] // ratio, self.config.input_shape[1] // ratio, self.config.init_filters * (ratio**2)))
+    y_shape = (logits.shape[0], self.config.input_shape[0] // ratio, self.config.input_shape[1] // ratio, self.config.init_filters * (ratio**2))
+    block_size = int(y_shape[-1] ** 0.5)
+    y = tf.transpose(tf.signal.idct(tf.transpose(y, perm=[0, 2, 1]), norm="ortho"), perm=[0, 2, 1])
+    y = tf.signal.idct(y, norm="ortho")
+    y = tf.reshape(y, [y_shape[0], y_shape[1] * block_size, y_shape[2] * block_size] + [1])
+    y = tf.nn.space_to_depth(y, block_size)
+
     for i, block in enumerate(reversed(self._block_list)):
       res_block = block
 
@@ -256,12 +302,6 @@ class RevNet(tf.keras.Model):
       for j in range(res_x.shape[1]):
         res_x[i, j] = np.linalg.solve(self._init_block.trainable_variables[0][0, 0, :, :self.config.input_shape[-1]].numpy().T, 
                                       y[0, i, j, :self.config.input_shape[-1]].numpy())
-    
-    # res_x = np.clip(res_x, 0, 1)
-    # if self.config.input_shape[-1] == 1:
-    #    plt.imshow(res_x[:, :, 0])
-    # else:
-    #    plt.imshow(res_x)
 
     return res_x
 
@@ -273,9 +313,7 @@ class RevNet(tf.keras.Model):
         h = tf.nn.space_to_depth(h, self.config.ratio[i])
       h = block(h, training=False)
 
-    all_values = tf.keras.layers.Flatten()(h)
+    h = self._dct_2d(h)
+    nuisance = self._get_nuisance(h)
 
-    result = np.delete(all_values.numpy(), np.array(range(self.config.n_classes)) * (all_values.shape[-1] // self.config.n_classes))
-
-    nuisance = tf.convert_to_tensor(result, dtype=self.config.dtype)
     return nuisance
